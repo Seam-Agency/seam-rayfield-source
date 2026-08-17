@@ -1,8 +1,29 @@
+import backgroundTextureUrl from "./assets/orange-gradient-CGeZ4tof.png";
+import blueNoiseTextureUrl from "./assets/LDR_RG01_0-Cx9G0smZ.png";
 import { applyRayfieldConfig, createRayfieldConfig, defaultRayfieldConfig } from "./config.js";
-import { fragmentShader, vertexShader } from "./shaders.js";
+import {
+  bokehFragmentShader,
+  outputFragmentShader,
+  shatterFragmentShader,
+  sineFragmentShader,
+  vertexShader,
+  vignetteFragmentShader,
+} from "./shaders.js";
 import type { DeepPartial, RayfieldConfig, RayfieldRendererOptions } from "./types.js";
 
 type Uniform = WebGLUniformLocation | null;
+
+interface ProgramState {
+  program: WebGLProgram;
+  uniforms: Map<string, Uniform>;
+}
+
+interface RenderTarget {
+  framebuffer: WebGLFramebuffer;
+  texture: WebGLTexture;
+  width: number;
+  height: number;
+}
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
@@ -17,11 +38,11 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
   return shader;
 }
 
-function createProgram(gl: WebGL2RenderingContext): WebGLProgram {
+function createProgram(gl: WebGL2RenderingContext, fragmentSource: string): ProgramState {
   const program = gl.createProgram();
   if (!program) throw new Error("Rayfield could not allocate a WebGL program.");
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexShader);
-  const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentShader);
+  const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
   gl.linkProgram(program);
@@ -32,7 +53,46 @@ function createProgram(gl: WebGL2RenderingContext): WebGLProgram {
     gl.deleteProgram(program);
     throw new Error(`Rayfield program link failed: ${message}`);
   }
-  return program;
+  return { program, uniforms: new Map() };
+}
+
+function createTexture(
+  gl: WebGL2RenderingContext,
+  wrap: number = gl.CLAMP_TO_EDGE,
+  data: Uint8Array = new Uint8Array([255, 255, 255, 255]),
+): WebGLTexture {
+  const texture = gl.createTexture();
+  if (!texture) throw new Error("Rayfield could not allocate a WebGL texture.");
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return texture;
+}
+
+function createTarget(gl: WebGL2RenderingContext): RenderTarget {
+  const texture = createTexture(gl);
+  const framebuffer = gl.createFramebuffer();
+  if (!framebuffer) {
+    gl.deleteTexture(texture);
+    throw new Error("Rayfield could not allocate a WebGL framebuffer.");
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { framebuffer, texture, width: 1, height: 1 };
+}
+
+function resizeTarget(gl: WebGL2RenderingContext, target: RenderTarget, width: number, height: number): void {
+  if (target.width === width && target.height === height) return;
+  target.width = width;
+  target.height = height;
+  gl.bindTexture(gl.TEXTURE_2D, target.texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.bindTexture(gl.TEXTURE_2D, null);
 }
 
 function hexToRgb(value: string): [number, number, number] {
@@ -54,17 +114,21 @@ export class RayfieldRenderer {
   readonly pointer: [number, number] = [0.5, 0.5];
   readonly currPointer: [number, number] = [0.5, 0.5];
 
-  private readonly program: WebGLProgram;
+  private readonly programs: Record<"vignette" | "sine" | "shatter" | "bokeh" | "output", ProgramState>;
   private readonly vao: WebGLVertexArrayObject;
   private readonly sourceTexture: WebGLTexture;
-  private readonly uniforms = new Map<string, Uniform>();
+  private readonly backgroundTexture: WebGLTexture;
+  private readonly blueNoiseTexture: WebGLTexture;
+  private readonly targets: [RenderTarget, RenderTarget];
   private readonly pixelRatio: number;
   private readonly reducedMotion: boolean;
+  private readonly assetImages: HTMLImageElement[] = [];
   private frame = 0;
   private startedAt = performance.now();
   private elapsedBeforePause = 0;
   private destroyed = false;
   private paused = false;
+  private backgroundLoaded = false;
   private source: TexImageSource | null = null;
   private resizeObserver?: ResizeObserver;
 
@@ -79,25 +143,36 @@ export class RayfieldRenderer {
     });
     if (!gl) throw new Error("Seam Rayfield requires WebGL 2.");
     this.gl = gl;
-    this.program = createProgram(gl);
+    this.programs = {
+      vignette: createProgram(gl, vignetteFragmentShader),
+      sine: createProgram(gl, sineFragmentShader),
+      shatter: createProgram(gl, shatterFragmentShader),
+      bokeh: createProgram(gl, bokehFragmentShader),
+      output: createProgram(gl, outputFragmentShader),
+    };
     const vao = gl.createVertexArray();
-    const texture = gl.createTexture();
-    if (!vao || !texture) throw new Error("Rayfield could not allocate WebGL resources.");
+    if (!vao) throw new Error("Rayfield could not allocate a WebGL vertex array.");
     this.vao = vao;
-    this.sourceTexture = texture;
+    this.sourceTexture = createTexture(gl);
+    this.backgroundTexture = createTexture(gl, gl.REPEAT);
+    this.blueNoiseTexture = createTexture(gl, gl.REPEAT, new Uint8Array([128, 128, 128, 255]));
+    this.targets = [createTarget(gl), createTarget(gl)];
     this.config = createRayfieldConfig(options.config);
-    this.pixelRatio = Math.max(0.5, Math.min(options.pixelRatio ?? window.devicePixelRatio ?? 1, 2));
+    // The source renderer deliberately runs at half resolution. Keeping that
+    // default preserves its soft edges and avoids changing the bokeh footprint.
+    this.pixelRatio = Math.max(0.25, Math.min(options.pixelRatio ?? 0.5, 2));
     this.reducedMotion = options.reducedMotion ?? window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
-    gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
-    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
-    gl.uniform1i(this.location("uSource"), 0);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    this.loadTexture(backgroundTextureUrl, this.backgroundTexture, () => {
+      this.backgroundLoaded = true;
+    });
+    this.loadTexture(blueNoiseTextureUrl, this.blueNoiseTexture);
 
     canvas.addEventListener("pointermove", this.onPointerMove, { passive: true });
     canvas.addEventListener("pointerenter", this.onPointerEnter, { passive: true });
@@ -146,11 +221,11 @@ export class RayfieldRenderer {
   refreshSourceTexture(): void {
     if (!this.source || this.destroyed) return;
     const gl = this.gl;
-    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.source);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.bindTexture(gl.TEXTURE_2D, null);
     if (this.paused || this.reducedMotion) this.draw(this.elapsedBeforePause / 1000);
   }
 
@@ -159,6 +234,7 @@ export class RayfieldRenderer {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
+    gl.bindTexture(gl.TEXTURE_2D, null);
   }
 
   resize(): void {
@@ -169,7 +245,8 @@ export class RayfieldRenderer {
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
-      this.gl.viewport(0, 0, width, height);
+      resizeTarget(this.gl, this.targets[0], width, height);
+      resizeTarget(this.gl, this.targets[1], width, height);
       if (this.paused || this.reducedMotion) this.draw(this.elapsedBeforePause / 1000);
     }
   }
@@ -213,84 +290,200 @@ export class RayfieldRenderer {
     this.canvas.removeEventListener("pointerenter", this.onPointerEnter);
     this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
     this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    this.assetImages.forEach((image) => {
+      image.onload = null;
+      image.onerror = null;
+    });
     this.gl.deleteTexture(this.sourceTexture);
+    this.gl.deleteTexture(this.backgroundTexture);
+    this.gl.deleteTexture(this.blueNoiseTexture);
+    this.targets.forEach((target) => {
+      this.gl.deleteTexture(target.texture);
+      this.gl.deleteFramebuffer(target.framebuffer);
+    });
+    Object.values(this.programs).forEach(({ program }) => this.gl.deleteProgram(program));
     this.gl.deleteVertexArray(this.vao);
-    this.gl.deleteProgram(this.program);
   }
 
-  private location(name: string): Uniform {
-    if (!this.uniforms.has(name)) this.uniforms.set(name, this.gl.getUniformLocation(this.program, name));
-    return this.uniforms.get(name) ?? null;
+  private location(state: ProgramState, name: string): Uniform {
+    if (!state.uniforms.has(name)) state.uniforms.set(name, this.gl.getUniformLocation(state.program, name));
+    return state.uniforms.get(name) ?? null;
   }
 
-  private set1(name: string, value: number): void {
-    this.gl.uniform1f(this.location(name), value);
+  private use(state: ProgramState): void {
+    this.gl.useProgram(state.program);
+    this.gl.bindVertexArray(this.vao);
   }
 
-  private set2(name: string, x: number, y: number): void {
-    this.gl.uniform2f(this.location(name), x, y);
+  private set1(state: ProgramState, name: string, value: number): void {
+    this.gl.uniform1f(this.location(state, name), value);
   }
 
-  private set3(name: string, value: string): void {
-    this.gl.uniform3fv(this.location(name), hexToRgb(value));
+  private setInt(state: ProgramState, name: string, value: number): void {
+    this.gl.uniform1i(this.location(state, name), value);
+  }
+
+  private set2(state: ProgramState, name: string, x: number, y: number): void {
+    this.gl.uniform2f(this.location(state, name), x, y);
+  }
+
+  private set3(state: ProgramState, name: string, value: string): void {
+    this.gl.uniform3fv(this.location(state, name), hexToRgb(value));
+  }
+
+  private bindTexture(state: ProgramState, name: string, texture: WebGLTexture, unit: number): void {
+    this.gl.activeTexture(this.gl.TEXTURE0 + unit);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+    this.setInt(state, name, unit);
+  }
+
+  private beginTarget(target: RenderTarget): void {
+    const clear = hexToRgb(this.config.output.color);
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, target.framebuffer);
+    this.gl.viewport(0, 0, target.width, target.height);
+    this.gl.clearColor(clear[0], clear[1], clear[2], 0);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
   }
 
   private draw(time: number): void {
     if (this.destroyed) return;
     const gl = this.gl;
     const c = this.config;
-    this.currPointer[0] += (this.pointer[0] - this.currPointer[0]) * 0.075;
-    this.currPointer[1] += (this.pointer[1] - this.currPointer[1]) * 0.075;
-    gl.useProgram(this.program);
-    gl.bindVertexArray(this.vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
-    this.set2("uResolution", this.canvas.width, this.canvas.height);
-    this.set1("uTime", time);
-    this.set2("uPointer", this.currPointer[0], this.currPointer[1]);
-    this.set3("uBackground", c.background.color);
-    this.set3("uShadow", c.vignette.color);
-    this.set3("uLight", c.output.color);
-    gl.uniform1i(this.location("uSourceMode"), c.source.mode === "texture" ? 1 : c.source.mode === "noise" ? 2 : 0);
-    this.set1("uSourceThreshold", c.source.threshold);
-    this.set1("uSourceSoftness", c.source.softness);
-    this.set1("uSourceInvert", bool(c.source.invert));
-    this.set1("uSourceMix", c.source.mix);
-    this.set1("uSourceScale", c.source.scale);
-    this.set1("uSourceRotation", c.source.rotation);
-    this.set2("uSourceOffset", c.source.offsetX, c.source.offsetY);
-    this.set1("uSourceHover", bool(c.source.hover && c.source.hoverActive));
-    this.set1("uSourceHoverStrength", c.source.hoverStrength);
-    this.set1("uVignetteRadius", c.vignette.radius);
-    this.set1("uVignetteFalloff", c.vignette.falloff);
-    this.set1("uVignetteDisplace", c.vignette.displace);
-    this.set1("uVignetteMix", c.vignette.mix);
-    this.set1("uVignetteAngle", c.vignette.angle);
-    this.set1("uVignetteSkew", c.vignette.skew);
-    this.set1("uWaveFrequency", c.sine.frequency);
-    this.set1("uWaveAmplitude", c.sine.amplitude);
-    this.set1("uWaveFalloff", c.sine.falloff);
-    this.set1("uWaveRotation", c.sine.rotation);
-    this.set1("uWavePhase", c.sine.phase);
-    this.set1("uWaveSpeed", c.sine.speed);
-    this.set1("uWaveMixRadius", c.sine.mixRadius);
-    this.set1("uWaveTrackPointer", bool(c.sine.trackMouse));
-    this.set1("uShatterScale", c.shatter.scale);
-    this.set1("uShatterAmount", c.shatter.amount);
-    this.set1("uShatterAngle", c.shatter.angle);
-    this.set1("uShatterRadius", c.shatter.radius);
-    this.set1("uShatterSkew", c.shatter.skew);
-    this.set1("uShatterMixRadius", c.shatter.mixRadius);
-    this.set1("uShatterInvert", bool(c.shatter.mixRadiusInvert));
-    this.set1("uBokehRadius", c.bokeh.radius);
-    this.set1("uBokehTilt", c.bokeh.tilt);
-    this.set1("uBokehMixRadius", c.bokeh.mixRadius);
-    this.set1("uBokehTrackPointer", bool(c.bokeh.trackMouse));
-    this.set1("uUseVignette", bool(c.useVignette));
-    this.set1("uUseWave", bool(c.useSine));
-    this.set1("uUseShatter", bool(c.useShatter));
-    this.set1("uUseBokeh", bool(c.useBokeh));
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    if (!width || !height) return;
+
+    this.currPointer[0] += (this.pointer[0] - this.currPointer[0]) * 0.1;
+    this.currPointer[1] += (this.pointer[1] - this.currPointer[1]) * 0.1;
+    const nativeTime = time * 2;
+
+    let read = this.targets[0];
+    let write = this.targets[1];
+    this.beginTarget(read);
+
+    if (c.useVignette) {
+      const state = this.programs.vignette;
+      this.use(state);
+      this.bindTexture(state, "tSourceTexture", this.sourceTexture, 0);
+      this.set2(state, "uResolution", width, height);
+      this.set1(state, "uRadius", c.vignette.radius);
+      this.set1(state, "uFalloff", c.vignette.falloff);
+      this.set1(state, "uMix", c.vignette.mix);
+      this.set1(state, "uDisplace", c.vignette.displace);
+      this.set1(state, "uSkew", c.vignette.skew);
+      this.set1(state, "uAngle", c.vignette.angle);
+      this.set3(state, "uVignetteColor", c.vignette.color);
+      this.set2(state, "uPos", this.currPointer[0], this.currPointer[1]);
+      this.set3(state, "uClearColor", c.background.color);
+      this.setInt(state, "uSourceMode", c.source.mode === "texture" ? 1 : c.source.mode === "noise" ? 2 : 0);
+      this.set1(state, "uSourceThreshold", c.source.threshold);
+      this.set1(state, "uSourceSoftness", c.source.softness);
+      this.set1(state, "uSourceInvert", bool(c.source.invert));
+      this.set1(state, "uSourceMix", c.source.mix);
+      this.set1(state, "uSourceScale", c.source.scale);
+      this.set1(state, "uSourceRotation", c.source.rotation);
+      this.set2(state, "uSourceOffset", c.source.offsetX, c.source.offsetY);
+      this.set2(state, "uSourcePointer", this.currPointer[0], this.currPointer[1]);
+      this.set1(state, "uSourceHover", bool(c.source.hover && c.source.hoverActive));
+      this.set1(state, "uSourceHoverStrength", c.source.hoverStrength);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    const swap = (): void => {
+      const previous = read;
+      read = write;
+      write = previous;
+    };
+
+    if (c.useSine) {
+      this.beginTarget(write);
+      const state = this.programs.sine;
+      this.use(state);
+      this.bindTexture(state, "tInput", read.texture, 0);
+      this.set2(state, "uResolution", width, height);
+      this.set1(state, "uTime", nativeTime);
+      this.set2(state, "uPos", 0.5, 0.5);
+      this.set1(state, "uFrequency", c.sine.frequency);
+      this.set1(state, "uAmplitude", c.sine.amplitude);
+      this.set1(state, "uRotation", c.sine.rotation);
+      this.set1(state, "uMixRadius", c.sine.mixRadius);
+      this.set2(state, "uMousePos", this.currPointer[0], this.currPointer[1]);
+      this.set1(state, "uTrackMouse", bool(c.sine.trackMouse));
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      swap();
+    }
+
+    if (c.useShatter) {
+      this.beginTarget(write);
+      const state = this.programs.shatter;
+      this.use(state);
+      this.bindTexture(state, "tInput", read.texture, 0);
+      this.set2(state, "uResolution", width, height);
+      this.set1(state, "uTime", nativeTime);
+      this.set2(state, "uPos", 0.5, 0.5);
+      this.set1(state, "uAmount", c.shatter.scale);
+      this.set1(state, "uSpread", c.shatter.amount);
+      this.set1(state, "uAngle", c.shatter.angle / 360);
+      this.set1(state, "uSkew", c.shatter.skew);
+      this.set1(state, "uMixRadius", c.shatter.mixRadius || 1);
+      this.set2(state, "uMousePos", this.currPointer[0], this.currPointer[1]);
+      this.set1(state, "uTrackMouse", 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      swap();
+    }
+
+    if (c.useBokeh) {
+      this.beginTarget(write);
+      const state = this.programs.bokeh;
+      this.use(state);
+      this.bindTexture(state, "tInput", read.texture, 0);
+      this.bindTexture(state, "tBlueNoise", this.blueNoiseTexture, 1);
+      this.set2(state, "uResolution", width, height);
+      this.set2(state, "uBlueNoiseResolution", 256, 256);
+      this.set1(state, "uAmount", c.bokeh.radius);
+      this.set1(state, "uTilt", c.bokeh.tilt);
+      this.set2(state, "uPos", 0.5, 0.5);
+      this.set2(state, "uMousePos", this.currPointer[0], this.currPointer[1]);
+      this.set1(state, "uTrackMouse", bool(c.bokeh.trackMouse));
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      swap();
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
+    const background = hexToRgb(c.background.color);
+    gl.clearColor(background[0], background[1], background[2], 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const output = this.programs.output;
+    this.use(output);
+    this.bindTexture(output, "tBgTexture", this.backgroundTexture, 0);
+    this.bindTexture(output, "tInput", read.texture, 1);
+    this.set3(output, "uOutputColor", c.output.color);
+    this.set3(output, "uBgColor", c.background.color);
+    this.setInt(output, "uLoaded", this.backgroundLoaded ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  private loadTexture(url: string, texture: WebGLTexture, onLoaded?: () => void): void {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      if (this.destroyed) return;
+      const gl = this.gl;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      onLoaded?.();
+      if (this.paused || this.reducedMotion) this.draw(this.elapsedBeforePause / 1000);
+    };
+    image.onerror = () => {
+      if (this.paused || this.reducedMotion) this.draw(this.elapsedBeforePause / 1000);
+    };
+    this.assetImages.push(image);
+    image.src = url;
   }
 
   private tick = (now: number): void => {

@@ -1,7 +1,7 @@
 import type { DeepPartial, RayfieldConfig } from "./types.js";
 
 export const defaultRayfieldConfig: RayfieldConfig = {
-  background: { color: "#dccfd0" },
+  background: { color: "#D5DAE0" },
   source: {
     mode: "procedural",
     threshold: 0.5,
@@ -50,7 +50,7 @@ export const defaultRayfieldConfig: RayfieldConfig = {
     mixRadius: 1,
     trackMouse: false,
   },
-  output: { color: "#f4d9ca" },
+  output: { color: "#FFD198" },
   useVignette: true,
   useSine: true,
   useShatter: true,

@@ -21,8 +21,8 @@ export function Hero() {
     <SeamRayfield
       style={{ minHeight: 420 }}
       config={{
-        background: { color: "#dccfd0" },
-        output: { color: "#f4d9ca" },
+        background: { color: "#D5DAE0" },
+        output: { color: "#FFD198" },
       }}
     />
   );

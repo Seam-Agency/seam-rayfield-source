@@ -7,18 +7,25 @@ void main() {
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-export const fragmentShader = `#version 300 es
+// These five passes are carried directly from the working source renderer.
+// Keeping the passes separate is essential: fracture and bokeh sample the
+// previous framebuffer rather than re-evaluating an analytic field.
+export const vignetteFragmentShader = `#version 300 es
 precision highp float;
+#define TWO_PI 6.28318530718
 in vec2 vUv;
 out vec4 fragColor;
-
+uniform float uRadius;
+uniform float uFalloff;
+uniform float uMix;
+uniform float uDisplace;
+uniform float uSkew;
+uniform float uAngle;
+uniform vec3 uVignetteColor;
+uniform vec2 uPos;
 uniform vec2 uResolution;
-uniform float uTime;
-uniform vec2 uPointer;
-uniform vec3 uBackground;
-uniform vec3 uShadow;
-uniform vec3 uLight;
-uniform sampler2D uSource;
+uniform sampler2D tSourceTexture;
+uniform vec3 uClearColor;
 uniform int uSourceMode;
 uniform float uSourceThreshold;
 uniform float uSourceSoftness;
@@ -27,44 +34,12 @@ uniform float uSourceMix;
 uniform float uSourceScale;
 uniform float uSourceRotation;
 uniform vec2 uSourceOffset;
+uniform vec2 uSourcePointer;
 uniform float uSourceHover;
 uniform float uSourceHoverStrength;
-uniform float uVignetteRadius;
-uniform float uVignetteFalloff;
-uniform float uVignetteDisplace;
-uniform float uVignetteMix;
-uniform float uVignetteAngle;
-uniform float uVignetteSkew;
-uniform float uWaveFrequency;
-uniform float uWaveAmplitude;
-uniform float uWaveFalloff;
-uniform float uWaveRotation;
-uniform float uWavePhase;
-uniform float uWaveSpeed;
-uniform float uWaveMixRadius;
-uniform float uWaveTrackPointer;
-uniform float uShatterScale;
-uniform float uShatterAmount;
-uniform float uShatterAngle;
-uniform float uShatterRadius;
-uniform float uShatterSkew;
-uniform float uShatterMixRadius;
-uniform float uShatterInvert;
-uniform float uBokehRadius;
-uniform float uBokehTilt;
-uniform float uBokehMixRadius;
-uniform float uBokehTrackPointer;
-uniform float uUseVignette;
-uniform float uUseWave;
-uniform float uUseShatter;
-uniform float uUseBokeh;
 
-#define PI 3.14159265359
-#define TAU 6.28318530718
-
-mat2 rotate2d(float angle) {
-  float s = sin(angle), c = cos(angle);
-  return mat2(c, -s, s, c);
+mat2 rot(float a) {
+  return mat2(cos(a), -sin(a), sin(a), cos(a));
 }
 
 float hash21(vec2 p) {
@@ -77,137 +52,246 @@ float valueNoise(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash21(i), hash21(i + vec2(1, 0)), f.x),
-             mix(hash21(i + vec2(0, 1)), hash21(i + vec2(1, 1)), f.x), f.y);
+  return mix(
+    mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+    mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0)), f.x),
+    f.y
+  );
 }
 
 float fbm(vec2 p) {
-  float total = 0.0;
+  float value = 0.0;
   float amplitude = 0.5;
-  for (int i = 0; i < 5; i++) {
-    total += valueNoise(p) * amplitude;
-    p = rotate2d(0.47) * p * 2.03 + 7.13;
+  mat2 octaveRotation = rot(0.47);
+  for (int octave = 0; octave < 5; octave++) {
+    value += valueNoise(p) * amplitude;
+    p = octaveRotation * p * 2.03 + 7.13;
     amplitude *= 0.5;
   }
-  return total;
-}
-
-float capsuleDistance(vec2 p, vec2 a, vec2 b, float radius) {
-  vec2 pa = p - a;
-  vec2 ba = b - a;
-  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
-  return length(pa - ba * h) - radius;
-}
-
-float rayStroke(vec2 p, vec2 center, float lengthValue, float widthValue, float angle, float strength) {
-  vec2 direction = vec2(cos(angle), sin(angle));
-  vec2 a = center - direction * lengthValue * 0.5;
-  vec2 b = center + direction * lengthValue * 0.5;
-  float distanceToStroke = capsuleDistance(p, a, b, widthValue);
-  float core = 1.0 - smoothstep(-widthValue * 0.28, widthValue * 0.42, distanceToStroke);
-  float halo = 1.0 - smoothstep(widthValue * 0.12, widthValue * 2.6, distanceToStroke);
-  return clamp((core * 0.82 + halo * 0.34) * strength, 0.0, 1.0);
-}
-
-float proceduralRayfield(vec2 p) {
-  float field = 0.0;
-
-  // The native source is a family of broad diagonal rays rather than a
-  // centred radial blob. The overlapping primary strokes form the soft body
-  // while the seeded strokes keep the field alive across the whole surface.
-  field = max(field, rayStroke(p, vec2(-0.42, -0.18), 0.92, 0.105, 0.73, 1.0));
-  field = max(field, rayStroke(p, vec2(-0.08, -0.22), 0.82, 0.092, 0.76, 0.98));
-  field = max(field, rayStroke(p, vec2(0.20, -0.29), 0.64, 0.080, 0.79, 0.92));
-  field = max(field, rayStroke(p, vec2(-0.62, -0.31), 0.48, 0.070, 0.70, 0.90));
-
-  for (int i = 0; i < 18; i++) {
-    float index = float(i);
-    float seedX = hash21(vec2(index + 2.7, 4.1));
-    float seedY = hash21(vec2(index + 8.3, 9.7));
-    float seedShape = hash21(vec2(index + 15.9, 2.2));
-    vec2 center = vec2(mix(-1.02, 1.02, seedX), mix(-0.50, 0.58, seedY));
-    center += vec2(sin(uTime * 0.055 + index * 0.81), cos(uTime * 0.047 + index * 0.63)) * 0.008;
-    float lengthValue = mix(0.14, 0.44, seedShape);
-    float widthValue = mix(0.021, 0.058, hash21(vec2(index + 5.4, 17.1)));
-    float angle = 0.75 + (hash21(vec2(index + 3.2, 21.8)) - 0.5) * 0.22;
-    float strength = mix(0.58, 0.94, hash21(vec2(index + 22.4, 6.6)));
-    field = max(field, rayStroke(p, center, lengthValue, widthValue, angle, strength));
-  }
-
-  float textureNoise = fbm(p * 6.5 + vec2(uTime * 0.018, -uTime * 0.012));
-  return clamp(field * mix(0.92, 1.05, textureNoise), 0.0, 1.0);
-}
-
-float sourceMask(vec2 uv) {
-  vec2 sourceUv = uv - 0.5;
-  vec2 pointerDelta = uv - uPointer;
-  float hover = exp(-dot(pointerDelta, pointerDelta) * 22.0) * uSourceHover;
-  sourceUv -= pointerDelta * hover * uSourceHoverStrength;
-  sourceUv = rotate2d(uSourceRotation * TAU) * sourceUv;
-  sourceUv /= max(0.001, uSourceScale);
-  sourceUv += 0.5 + uSourceOffset;
-  float inside = step(0.0, sourceUv.x) * step(sourceUv.x, 1.0) * step(0.0, sourceUv.y) * step(sourceUv.y, 1.0);
-  float luma = dot(texture(uSource, sourceUv).rgb, vec3(0.299, 0.587, 0.114)) * inside;
-  if (uSourceMode == 2) luma = fbm(sourceUv * 7.0 + uTime * 0.025);
-  float mask = smoothstep(uSourceThreshold - uSourceSoftness, uSourceThreshold + uSourceSoftness, luma);
-  return mix(mask, 1.0 - mask, uSourceInvert);
-}
-
-float fieldAt(vec2 uv) {
-  vec2 aspect = vec2(uResolution.x / max(1.0, uResolution.y), 1.0);
-  vec2 p = (uv - 0.5) * aspect;
-  vec2 pointer = (uPointer - 0.5) * aspect;
-
-  float distanceFromOrigin = length(p);
-  float radialMix = smoothstep(0.0, max(0.001, uShatterRadius), distanceFromOrigin);
-
-  if (uUseShatter > 0.5) {
-    float angle = atan(p.y, p.x) + radians(uShatterAngle);
-    float cells = mix(5.0, 34.0, clamp(uShatterScale, 0.0, 1.5) / 1.5);
-    float wedge = floor((angle / TAU + 0.5) * cells);
-    float jitter = hash21(vec2(wedge, floor(distanceFromOrigin * 12.0)));
-    vec2 tangent = normalize(vec2(-p.y, p.x) + 0.0001);
-    float mask = mix(1.0 - radialMix, radialMix, uShatterInvert);
-    p += tangent * (jitter - 0.5) * uShatterAmount * 0.11 * mix(1.0, mask, uShatterMixRadius);
-    p.x += (jitter - 0.5) * uShatterSkew * 0.035;
-  }
-
-  if (uUseWave > 0.5) {
-    float rotation = uWaveRotation * TAU;
-    vec2 direction = vec2(cos(rotation), sin(rotation));
-    vec2 normal = vec2(-direction.y, direction.x);
-    float pointerPhase = dot(pointer, direction) * uWaveTrackPointer * 3.0;
-    float wave = sin(dot(p, direction) * (5.0 + uWaveFrequency * 22.0) + uWavePhase * TAU + uTime * uWaveSpeed * 2.5 + pointerPhase);
-    float attenuation = mix(1.0, exp(-distanceFromOrigin * (1.0 + uWaveFalloff * 5.0)), uWaveFalloff);
-    p += normal * wave * uWaveAmplitude * 0.045 * attenuation * mix(1.0, 1.0 - radialMix, uWaveMixRadius);
-  }
-
-  vec2 skew = vec2(max(0.05, uVignetteSkew * 1.8), max(0.05, (1.0 - uVignetteSkew) * 1.8));
-  vec2 vp = rotate2d(uVignetteAngle * TAU) * (p * skew);
-  float radius = length(vp);
-  float edge = max(0.005, uVignetteRadius * 0.72);
-  float soft = max(0.002, edge * (0.06 + uVignetteFalloff * 0.52));
-  float radial = 1.0 - smoothstep(edge - soft, edge + soft, radius + fbm(vp * 5.0) * uVignetteDisplace * 0.06);
-  float authored = uSourceMode == 0 ? proceduralRayfield(p) : sourceMask(uv);
-  float mask = mix(radial, authored, uSourceMix);
-
-  return mix(1.0, mask, uVignetteMix * uUseVignette);
+  return value;
 }
 
 void main() {
   vec2 uv = vUv;
-  float field = fieldAt(uv);
-  if (uUseBokeh > 0.5) {
-    float bloom = clamp(uBokehRadius / 1.5, 0.0, 1.0) * mix(0.45, 1.0, uBokehMixRadius);
-    float shoulder = sqrt(max(field, 0.0));
-    float softField = smoothstep(0.0, max(0.52, 1.0 - bloom * 0.2), field);
-    field = mix(field, mix(softField, shoulder, 0.34), bloom * 0.42);
+  float displacement = 0.5 * uDisplace * 0.5;
+  vec2 aspectRatio = vec2(uResolution.x / uResolution.y, 1.0);
+  vec2 skew = vec2(uSkew, 1.0 - uSkew);
+  float halfRadius = uRadius * 0.5;
+  float innerEdge = halfRadius - uFalloff * halfRadius * 0.5;
+  float outerEdge = halfRadius + uFalloff * halfRadius * 0.5;
+  vec2 scaledUV = uv * aspectRatio * rot(uAngle * TWO_PI) * skew;
+  vec2 scaledPos = uPos * aspectRatio * rot(uAngle * TWO_PI) * skew;
+  float radius = distance(scaledUV, scaledPos);
+  float radialFalloff = smoothstep(innerEdge + displacement, outerEdge + displacement, radius);
+
+  float pointerInside = step(0.0, uSourcePointer.x) * step(uSourcePointer.x, 1.0)
+    * step(0.0, uSourcePointer.y) * step(uSourcePointer.y, 1.0);
+  vec2 pointerDelta = uv - uSourcePointer;
+  float hoverFalloff = exp(-dot(pointerDelta, pointerDelta) * 22.0);
+  vec2 hoverUv = uv - pointerDelta * hoverFalloff
+    * uSourceHoverStrength * uSourceHover * pointerInside;
+  vec2 sourceUv = hoverUv - 0.5;
+  sourceUv = rot(uSourceRotation * TWO_PI) * sourceUv;
+  sourceUv /= max(uSourceScale, 0.001);
+  sourceUv += 0.5 + uSourceOffset;
+  float sourceInside = step(0.0, sourceUv.x) * step(sourceUv.x, 1.0)
+    * step(0.0, sourceUv.y) * step(sourceUv.y, 1.0);
+  float authoredLuma = dot(texture(tSourceTexture, sourceUv).rgb, vec3(0.299, 0.587, 0.114)) * sourceInside;
+  float noiseLuma = fbm(sourceUv * 7.0);
+  float sourceLuma = uSourceMode == 2 ? noiseLuma : authoredLuma;
+  float sourceMask = smoothstep(
+    uSourceThreshold - uSourceSoftness,
+    uSourceThreshold + uSourceSoftness,
+    sourceLuma
+  );
+  sourceMask = mix(sourceMask, 1.0 - sourceMask, uSourceInvert);
+  float authoredFalloff = 1.0 - sourceMask;
+  float falloff = uSourceMode == 0
+    ? radialFalloff
+    : mix(radialFalloff, authoredFalloff, uSourceMix);
+  fragColor = mix(vec4(uClearColor, 0.0), vec4(uVignetteColor, 1.0), falloff);
+}`;
+
+export const sineFragmentShader = `#version 300 es
+precision mediump float;
+#define PI3 1.04709283144
+in vec2 vUv;
+uniform sampler2D tInput;
+uniform float uMixRadius;
+uniform vec2 uPos;
+uniform float uFrequency;
+uniform float uAmplitude;
+uniform float uRotation;
+uniform float uTime;
+uniform vec2 uResolution;
+uniform vec2 uMousePos;
+uniform float uTrackMouse;
+out vec4 fragColor;
+void main() {
+  vec2 uv = vUv;
+  vec2 waveCoord = vUv.xy * 2.0 - 1.0;
+  float time = uTime * 0.25;
+  float frequency = 20.0 * uFrequency;
+  float amp = uAmplitude * 0.2;
+  float waveX = sin((waveCoord.y + uPos.y) * frequency + (time * PI3)) * amp;
+  float waveY = sin((waveCoord.x - uPos.x) * frequency + (time * PI3)) * amp;
+  waveCoord.xy += vec2(mix(waveX, 0.0, uRotation), mix(0.0, waveY, uRotation));
+  vec2 finalUV = waveCoord * 0.5 + 0.5;
+  float aspectRatio = uResolution.x / uResolution.y;
+  vec2 mPos = uPos + mix(vec2(0.0), (uMousePos - 0.5), uTrackMouse);
+  float dist = max(0.0, 1.0 - distance(uv * vec2(aspectRatio, 1.0), mPos * vec2(aspectRatio, 1.0)) * 4.0 * (1.0 - uMixRadius));
+  uv = mix(uv, finalUV, dist);
+  fragColor = texture(tInput, uv);
+}`;
+
+export const shatterFragmentShader = `#version 300 es
+precision mediump float;
+#define PI 3.14159265359
+in vec2 vUv;
+uniform sampler2D tInput;
+uniform float uAmount;
+uniform float uSpread;
+uniform float uAngle;
+uniform float uTime;
+uniform float uSkew;
+uniform vec2 uPos;
+uniform vec2 uResolution;
+uniform float uMixRadius;
+uniform vec2 uMousePos;
+uniform float uTrackMouse;
+out vec4 fragColor;
+
+vec2 random2(vec2 p) {
+  return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+}
+
+mat2 rot(float a) {
+  return mat2(cos(a), -sin(a), sin(a), cos(a));
+}
+
+void main() {
+  vec2 uv = vUv;
+  float aspectRatio = uResolution.x / uResolution.y;
+  vec2 skew = mix(vec2(1.0), vec2(1.0, 0.0), uSkew);
+  vec2 st = (uv - uPos) * vec2(aspectRatio, 1.0) * 50.0 * uAmount;
+  st = st * rot(uAngle * 2.0 * PI) * skew;
+  vec2 i_st = floor(st);
+  vec2 f_st = fract(st);
+  float m_dist = 15.0;
+  vec2 m_point = vec2(0.0);
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 neighbor = vec2(float(i), float(j));
+      vec2 point = random2(i_st + neighbor);
+      point = 0.5 + 0.5 * sin(5.0 + uTime * 0.2 + 6.2831 * point);
+      vec2 diff = neighbor + point - f_st;
+      float dist = length(diff);
+      if (dist < m_dist) {
+        m_dist = dist;
+        m_point = point;
+      }
+    }
   }
-  float shadowWeight = 0.12 + smoothstep(0.0, 0.84, 1.0 - field) * 0.09;
-  vec3 base = mix(uBackground, uShadow, shadowWeight);
-  base = mix(base, uLight, 0.035 + uv.x * 0.018);
-  vec3 color = mix(base, uLight, smoothstep(0.12, 0.88, field));
-  float grain = hash21(gl_FragCoord.xy + floor(uTime * 12.0)) - 0.5;
-  color += grain * 0.012;
-  fragColor = vec4(color, 1.0);
+  vec2 offset = (m_point * 0.2 * uSpread * 2.0) - (uSpread * 0.2);
+  vec2 mPos = uPos + mix(vec2(0.0), (uMousePos - 0.5), uTrackMouse);
+  float dist = max(0.0, 1.0 - distance(uv * vec2(aspectRatio, 1.0), mPos * vec2(aspectRatio, 1.0)) * 4.0 * (1.0 - uMixRadius));
+  fragColor = texture(tInput, uv + offset * dist);
+}`;
+
+export const bokehFragmentShader = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+#define PI2 6.28318530718
+#define ITERATIONS 50.0
+#define GOLDEN_ANGLE 2.39996323
+uniform sampler2D tInput;
+uniform sampler2D tBlueNoise;
+uniform float uAmount;
+uniform float uTilt;
+uniform vec2 uPos;
+uniform vec2 uResolution;
+uniform vec2 uMousePos;
+uniform float uTrackMouse;
+uniform vec2 uBlueNoiseResolution;
+
+vec2 sampleOffset(in float theta, inout float r) {
+  r += 1.0 / r;
+  return (r - 1.0) * vec2(cos(theta), sin(theta));
+}
+
+float getBlueNoiseOffset(vec2 st) {
+  ivec2 texSize = ivec2(uBlueNoiseResolution);
+  vec4 blueNoise = texelFetch(
+    tBlueNoise,
+    ivec2(fract(st * uResolution / vec2(texSize) * vec2(float(texSize.x) / float(texSize.y), 1.0)) * vec2(texSize)) % texSize,
+    0
+  );
+  return mod((blueNoise.r - 0.5) * PI2, PI2);
+}
+
+vec4 bokeh(sampler2D tex, vec2 uv, float blurRadius) {
+  vec3 accumulatedColor = vec3(0.0);
+  vec3 accumulatedWeights = vec3(0.0);
+  float accumulatedAlpha = 0.0;
+  float aspectRatio = uResolution.x / uResolution.y;
+  vec2 pixelSize = vec2(1.0 / aspectRatio, 1.0) * 0.04 * 0.075;
+  float r = 1.0;
+  float noiseOffset = (getBlueNoiseOffset(uv) - 0.5) * 0.01;
+  float noiseAngle = noiseOffset * PI2;
+  mat2 rotationMatrix = mat2(cos(noiseAngle), -sin(noiseAngle), sin(noiseAngle), cos(noiseAngle));
+  for (float j = 0.0; j < GOLDEN_ANGLE * ITERATIONS; j += GOLDEN_ANGLE) {
+    vec2 offset = sampleOffset(j, r) * pixelSize;
+    float jitterAmount = 0.05 * (sin(j * 0.1) * 0.5 + 0.5);
+    offset *= 1.0 + jitterAmount * sin(j * 0.7 + noiseOffset);
+    vec2 samplePosition = rotationMatrix * offset;
+    vec4 colorSample = texture(tex, uv + samplePosition);
+    vec3 bokehWeight = vec3(5.0) + pow(colorSample.rgb, vec3(9.0)) * 150.0;
+    accumulatedAlpha += colorSample.a;
+    accumulatedColor += colorSample.rgb * bokehWeight;
+    accumulatedWeights += bokehWeight;
+  }
+  return vec4(accumulatedColor / accumulatedWeights, accumulatedAlpha / ITERATIONS);
+}
+
+void main() {
+  vec2 uv = vUv;
+  if (uAmount == 0.0) {
+    fragColor = vec4(0.0);
+    return;
+  }
+  vec2 pos = uPos + mix(vec2(0.0), (uMousePos - 0.5), uTrackMouse);
+  float dis = distance(uv, pos) * 1000.0;
+  float tilt = mix(1.0 - dis * 0.001, dis * 0.001, uTilt);
+  fragColor = bokeh(tInput, uv, uAmount * tilt);
+}`;
+
+export const outputFragmentShader = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D tBgTexture;
+uniform vec3 uBgColor;
+uniform sampler2D tInput;
+uniform vec3 uOutputColor;
+uniform int uLoaded;
+
+vec3 overlay(vec3 base, vec3 blend) {
+  return mix(
+    2.0 * base * blend,
+    1.0 - 2.0 * (1.0 - base) * (1.0 - blend),
+    step(0.5, base)
+  );
+}
+
+void main() {
+  if (uLoaded != 1) {
+    fragColor = vec4(197.0 / 255.0, 136.0 / 255.0, 122.0 / 255.0, 1.0);
+  } else {
+    vec3 bgTex = texture(tBgTexture, vUv).rgb;
+    vec3 base = mix(uBgColor, overlay(uBgColor, bgTex), 0.61);
+    vec4 inputSample = texture(tInput, vUv);
+    vec3 blend = mix(uOutputColor, inputSample.rgb, inputSample.a);
+    fragColor = vec4(base * mix(vec3(1.0), blend, 0.26), 1.0);
+  }
 }`;

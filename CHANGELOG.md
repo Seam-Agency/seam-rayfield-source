@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3 — 2026-08-17
+
+- Replaced the approximate single-pass field with the source renderer's native vignette, wave, fracture, bokeh, and output framebuffer chain.
+- Bundled the matching background-gradient and blue-noise textures so the public package and deployed demo render independently without source maps or runtime asset proxies.
+
 ## 0.1.2 — 2026-08-17
 
 - Reduced the procedural bokeh path to one field evaluation so software WebGL and low-power devices render the same broad rays without blocking interaction.

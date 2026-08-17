@@ -11,7 +11,7 @@ describe("createRayfieldConfig", () => {
     expect(config.output.color).toBe("#ffffff");
     expect(config.sine.speed).toBe(0.42);
     expect(config.sine.frequency).toBe(defaultRayfieldConfig.sine.frequency);
-    expect(defaultRayfieldConfig.output.color).toBe("#f4d9ca");
+    expect(defaultRayfieldConfig.output.color).toBe("#FFD198");
   });
 
   it("creates isolated nested objects", () => {
