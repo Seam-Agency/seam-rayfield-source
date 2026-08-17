@@ -1,0 +1,73 @@
+name: Publish package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: github-packages-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish GitHub package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out released source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          registry-url: https://npm.pkg.github.com
+          scope: "@seam-agency"
+          package-manager-cache: false
+      - name: Verify release tag
+        run: >-
+          node -e "const p=require('./package.json'); const expected='v'+p.version;
+          if(process.env.GITHUB_REF_NAME!==expected) throw new Error('Release tag must equal package version '+expected)"
+      - name: Install frozen dependencies
+        run: npm ci
+      - name: Verify release candidate
+        run: npm run check && npm run smoke:consumer && npm pack --dry-run
+      - name: Pack public release artifact
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(npm pack --silent)"
+          cp "$archive" seam-rayfield.tgz
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Attach package tarball to release
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.pack.outputs.archive }}" seam-rayfield.tgz --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published package installation
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          consumer="$RUNNER_TEMP/seam-rayfield-consumer"
+          npmrc="$RUNNER_TEMP/seam-rayfield-consumer.npmrc"
+          {
+            echo "registry=https://registry.npmjs.org"
+            echo "@seam-agency:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"
+          } > "$npmrc"
+          NPM_CONFIG_USERCONFIG="$npmrc" npm install --ignore-scripts --prefix "$consumer" \
+            "@seam-agency/seam-rayfield@$version" react@19 react-dom@19
+          test -f "$consumer/node_modules/@seam-agency/seam-rayfield/dist/index.js"
+          test -f "$consumer/node_modules/@seam-agency/seam-rayfield/dist/styles.css"

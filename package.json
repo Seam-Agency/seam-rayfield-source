@@ -1,0 +1,76 @@
+{
+  "name": "@seam-agency/seam-rayfield",
+  "version": "0.1.0",
+  "description": "A configurable WebGL light-field renderer for React and the browser.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Seam Agency",
+  "homepage": "https://seam.tools/rayfield/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Seam-Agency/seam-rayfield-source.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Seam-Agency/seam-rayfield-source/issues"
+  },
+  "keywords": [
+    "react",
+    "webgl",
+    "shader",
+    "light-field",
+    "canvas",
+    "animation"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "LICENSES.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "check:distribution": "node scripts/check-distribution.mjs",
+    "smoke:consumer": "node scripts/consumer-smoke.mjs",
+    "check": "npm run typecheck && npm run test && npm run build && npm run check:distribution",
+    "prepublishOnly": "npm run check"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "peerDependencies": {
+    "react": ">=18.2.0",
+    "react-dom": ">=18.2.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "jsdom": "29.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}
