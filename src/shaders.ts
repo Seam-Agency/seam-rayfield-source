@@ -92,6 +92,52 @@ float fbm(vec2 p) {
   return total;
 }
 
+float capsuleDistance(vec2 p, vec2 a, vec2 b, float radius) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+  return length(pa - ba * h) - radius;
+}
+
+float rayStroke(vec2 p, vec2 center, float lengthValue, float widthValue, float angle, float strength) {
+  vec2 direction = vec2(cos(angle), sin(angle));
+  vec2 a = center - direction * lengthValue * 0.5;
+  vec2 b = center + direction * lengthValue * 0.5;
+  float distanceToStroke = capsuleDistance(p, a, b, widthValue);
+  float core = 1.0 - smoothstep(-widthValue * 0.28, widthValue * 0.42, distanceToStroke);
+  float halo = 1.0 - smoothstep(widthValue * 0.12, widthValue * 2.6, distanceToStroke);
+  return clamp((core * 0.82 + halo * 0.34) * strength, 0.0, 1.0);
+}
+
+float proceduralRayfield(vec2 p) {
+  float field = 0.0;
+
+  // The native source is a family of broad diagonal rays rather than a
+  // centred radial blob. The overlapping primary strokes form the soft body
+  // while the seeded strokes keep the field alive across the whole surface.
+  field = max(field, rayStroke(p, vec2(-0.42, -0.18), 0.92, 0.105, 0.73, 1.0));
+  field = max(field, rayStroke(p, vec2(-0.08, -0.22), 0.82, 0.092, 0.76, 0.98));
+  field = max(field, rayStroke(p, vec2(0.20, -0.29), 0.64, 0.080, 0.79, 0.92));
+  field = max(field, rayStroke(p, vec2(-0.62, -0.31), 0.48, 0.070, 0.70, 0.90));
+
+  for (int i = 0; i < 18; i++) {
+    float index = float(i);
+    float seedX = hash21(vec2(index + 2.7, 4.1));
+    float seedY = hash21(vec2(index + 8.3, 9.7));
+    float seedShape = hash21(vec2(index + 15.9, 2.2));
+    vec2 center = vec2(mix(-1.02, 1.02, seedX), mix(-0.50, 0.58, seedY));
+    center += vec2(sin(uTime * 0.055 + index * 0.81), cos(uTime * 0.047 + index * 0.63)) * 0.008;
+    float lengthValue = mix(0.14, 0.44, seedShape);
+    float widthValue = mix(0.021, 0.058, hash21(vec2(index + 5.4, 17.1)));
+    float angle = 0.75 + (hash21(vec2(index + 3.2, 21.8)) - 0.5) * 0.22;
+    float strength = mix(0.58, 0.94, hash21(vec2(index + 22.4, 6.6)));
+    field = max(field, rayStroke(p, center, lengthValue, widthValue, angle, strength));
+  }
+
+  float textureNoise = fbm(p * 6.5 + vec2(uTime * 0.018, -uTime * 0.012));
+  return clamp(field * mix(0.92, 1.05, textureNoise), 0.0, 1.0);
+}
+
 float sourceMask(vec2 uv) {
   vec2 sourceUv = uv - 0.5;
   vec2 pointerDelta = uv - uPointer;
@@ -142,13 +188,9 @@ float fieldAt(vec2 uv) {
   float edge = max(0.005, uVignetteRadius * 0.72);
   float soft = max(0.002, edge * (0.06 + uVignetteFalloff * 0.52));
   float radial = 1.0 - smoothstep(edge - soft, edge + soft, radius + fbm(vp * 5.0) * uVignetteDisplace * 0.06);
-  float authored = uSourceMode == 0 ? radial : sourceMask(uv);
+  float authored = uSourceMode == 0 ? proceduralRayfield(p) : sourceMask(uv);
   float mask = mix(radial, authored, uSourceMix);
 
-  float angle = atan(p.y, p.x);
-  float rayBands = 0.5 + 0.5 * sin(angle * (26.0 + uShatterScale * 34.0) + radius * 20.0 - uTime * (0.35 + uWaveSpeed));
-  rayBands = pow(rayBands, 5.0) * smoothstep(0.02, 0.55, radius);
-  mask = clamp(mask + rayBands * (0.08 + 0.2 * uShatterAmount) * uUseShatter, 0.0, 1.0);
   return mix(1.0, mask, uVignetteMix * uUseVignette);
 }
 
@@ -166,8 +208,10 @@ void main() {
     blur += fieldAt(uv - vec2(-tilt.y, tilt.x) * px * spread * 1.35);
     field = blur / 5.0;
   }
-  vec3 base = mix(uBackground, uShadow, smoothstep(0.0, 0.62, 1.0 - field));
-  vec3 color = mix(base, uLight, smoothstep(0.42, 1.0, field));
+  float shadowWeight = 0.12 + smoothstep(0.0, 0.84, 1.0 - field) * 0.09;
+  vec3 base = mix(uBackground, uShadow, shadowWeight);
+  base = mix(base, uLight, 0.035 + uv.x * 0.018);
+  vec3 color = mix(base, uLight, smoothstep(0.12, 0.88, field));
   float grain = hash21(gl_FragCoord.xy + floor(uTime * 12.0)) - 0.5;
   color += grain * 0.012;
   fragColor = vec4(color, 1.0);

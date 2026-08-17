@@ -4,7 +4,7 @@
   width: 100%;
   min-height: 12rem;
   overflow: hidden;
-  background: var(--seam-rayfield-background, #d5dae0);
+  background: var(--seam-rayfield-background, #dccfd0);
 }
 
 .seam-rayfield__canvas {
