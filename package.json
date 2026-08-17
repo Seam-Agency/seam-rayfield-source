@@ -1,6 +1,6 @@
 {
   "name": "@seam-agency/seam-rayfield",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A configurable WebGL light-field renderer for React and the browser.",
   "type": "module",
   "license": "MIT",

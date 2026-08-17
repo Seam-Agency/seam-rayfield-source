@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 — 2026-08-17
+
+- Reduced the procedural bokeh path to one field evaluation so software WebGL and low-power devices render the same broad rays without blocking interaction.
+
 ## 0.1.1 — 2026-08-17
 
 - Restored the native broad diagonal ray-field character for the procedural source.

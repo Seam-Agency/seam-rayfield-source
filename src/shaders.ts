@@ -198,15 +198,10 @@ void main() {
   vec2 uv = vUv;
   float field = fieldAt(uv);
   if (uUseBokeh > 0.5) {
-    vec2 px = vec2(1.0) / uResolution;
-    vec2 tilt = normalize(vec2(cos(uBokehTilt * PI), sin(uBokehTilt * PI)) + 0.0001);
-    float spread = (0.5 + uBokehRadius * 4.0) * mix(0.45, 1.0, uBokehMixRadius);
-    float blur = field;
-    blur += fieldAt(uv + tilt * px * spread * 2.0);
-    blur += fieldAt(uv - tilt * px * spread * 2.0);
-    blur += fieldAt(uv + vec2(-tilt.y, tilt.x) * px * spread * 1.35);
-    blur += fieldAt(uv - vec2(-tilt.y, tilt.x) * px * spread * 1.35);
-    field = blur / 5.0;
+    float bloom = clamp(uBokehRadius / 1.5, 0.0, 1.0) * mix(0.45, 1.0, uBokehMixRadius);
+    float shoulder = sqrt(max(field, 0.0));
+    float softField = smoothstep(0.0, max(0.52, 1.0 - bloom * 0.2), field);
+    field = mix(field, mix(softField, shoulder, 0.34), bloom * 0.42);
   }
   float shadowWeight = 0.12 + smoothstep(0.0, 0.84, 1.0 - field) * 0.09;
   vec3 base = mix(uBackground, uShadow, shadowWeight);
